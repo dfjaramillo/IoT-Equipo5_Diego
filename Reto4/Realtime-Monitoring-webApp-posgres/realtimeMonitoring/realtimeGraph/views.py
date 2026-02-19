@@ -673,3 +673,77 @@ Filtro para formatear datos en los templates
 @ register.filter
 def add_str(str1, str2):
     return str1 + str2
+
+
+'''
+Endpoint: GET /api/station-summary/
+Devuelve un resumen completo de cada estación con estadísticas agregadas
+(min, max, avg, count, última lectura) por cada tipo de medición,
+incluyendo información de ubicación geográfica y usuario.
+Joins: Data -> Station -> User, Location -> City, State, Country; Data -> Measurement
+'''
+
+
+@csrf_exempt
+def station_summary(request):
+    if request.method != 'GET':
+        return HttpResponseBadRequest(json.dumps({'error': 'Método no permitido'}), content_type='application/json')
+
+    stations = Station.objects.select_related(
+        'user', 'location', 'location__city', 'location__state', 'location__country'
+    ).filter(active=True)
+
+    result = []
+
+    for station in stations:
+        measurements = Measurement.objects.filter(active=True)
+        station_measurements = []
+
+        for measure in measurements:
+            data_qs = Data.objects.filter(station=station, measurement=measure)
+            count = data_qs.count()
+            if count == 0:
+                continue
+
+            agg = data_qs.aggregate(
+                min_value=Min('value'),
+                max_value=Max('value'),
+                avg_value=Avg('value'),
+                total=Sum('value'),
+                count=Count('value'),
+            )
+
+            latest = data_qs.order_by('-time').first()
+
+            station_measurements.append({
+                'measurement': measure.name,
+                'unit': measure.unit,
+                'count': agg['count'],
+                'min': round(agg['min_value'], 2) if agg['min_value'] is not None else None,
+                'max': round(agg['max_value'], 2) if agg['max_value'] is not None else None,
+                'avg': round(agg['avg_value'], 2) if agg['avg_value'] is not None else None,
+                'total': round(agg['total'], 2) if agg['total'] is not None else None,
+                'latest_value': latest.value if latest else None,
+                'latest_time': latest.time.isoformat() if latest else None,
+            })
+
+        if not station_measurements:
+            continue
+
+        loc = station.location
+        result.append({
+            'station_id': station.id,
+            'user': station.user.login,
+            'location': {
+                'description': loc.description,
+                'city': loc.city.name,
+                'state': loc.state.name,
+                'country': loc.country.name,
+                'lat': float(loc.lat) if loc.lat else None,
+                'lng': float(loc.lng) if loc.lng else None,
+            },
+            'last_activity': station.last_activity.isoformat() if station.last_activity else None,
+            'measurements': station_measurements,
+        })
+
+    return JsonResponse({'stations': result, 'total_stations': len(result)}, safe=False)
