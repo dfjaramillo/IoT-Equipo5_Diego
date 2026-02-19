@@ -772,4 +772,83 @@ def add_str(str1, str2):
     return str1 + str2
 
 
+'''
+Endpoint: GET /api/station-summary/
+Devuelve un resumen completo de cada estación con estadísticas agregadas
+(min, max, avg, count, última lectura) por cada tipo de medición,
+incluyendo información de ubicación geográfica y usuario.
+Joins: Data -> Station -> User, Location -> City, State, Country; Data -> Measurement
+'''
 
+def station_summary(request):
+    """
+    GET /api/station-summary/
+    Retorna un JSON con el resumen de cada estación: usuario, ubicación,
+    última actividad y estadísticas agregadas por variable de medición.
+    """
+    stations = Station.objects.select_related(
+        "user", "location", "location__city", "location__state", "location__country"
+    ).filter(active=True)
+
+    measurements = Measurement.objects.filter(active=True)
+    result = []
+
+    for station in stations:
+        loc = station.location
+        station_info = {
+            "station_id": station.id,
+            "user": station.user.login,
+            "location": {
+                "description": loc.description,
+                "city": loc.city.name,
+                "state": loc.state.name,
+                "country": loc.country.name,
+                "lat": float(loc.lat) if loc.lat is not None else None,
+                "lng": float(loc.lng) if loc.lng is not None else None,
+            },
+            "last_activity": station.last_activity.isoformat() if station.last_activity else None,
+            "measurements": [],
+        }
+
+        for measure in measurements:
+            data_qs = Data.objects.filter(station=station, measurement=measure)
+
+            if not data_qs.exists():
+                continue
+
+            agg = data_qs.aggregate(
+                min_val=Min("min_value"),
+                max_val=Max("max_value"),
+                avg_val=Avg("avg_value"),
+                total_points=Sum("length"),
+                chunk_count=Count("time"),
+            )
+
+            # Calcular total como avg * count
+            total_points = agg["total_points"] or 0
+            avg_val = agg["avg_val"]
+            total_val = round(avg_val * total_points, 2) if avg_val is not None else 0
+
+            latest = data_qs.order_by("-base_time").first()
+            latest_value = latest.values[-1] if latest and latest.values else None
+            latest_time = latest.base_time.isoformat() if latest else None
+
+            station_info["measurements"].append({
+                "measurement": measure.name,
+                "unit": measure.unit,
+                "count": total_points,
+                "min": agg["min_val"],
+                "max": agg["max_val"],
+                "avg": round(avg_val, 2) if avg_val is not None else None,
+                "total": total_val,
+                "latest_value": latest_value,
+                "latest_time": latest_time,
+            })
+
+        if station_info["measurements"]:
+            result.append(station_info)
+
+    return JsonResponse({
+        "stations": result,
+        "total_stations": len(result),
+    })
